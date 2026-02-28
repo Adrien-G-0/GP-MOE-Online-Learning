@@ -27,57 +27,72 @@ class SMCParticle:
         """Returns list of X arrays for existing clusters."""
         return [self.experts[k].get_X() for k in range(self.next_cluster_id)]
 
+    def update_alpha(self):
+        """Met à jour alpha selon l'Équation 15 de l'article."""
+        K = self.next_cluster_id
+        N_total = sum(e.N for e in self.experts.values())
+        if N_total == 0: 
+            return
+            
+        a_0, b_0 = 1.0, 1.0  # Hyperparamètres a priori pour Gamma
+        
+        # Tirage de la variable latente rho
+        rho = np.random.beta(self.alpha + 1, N_total)
+        rho_safe = max(rho, 1e-15) # Stabilité numérique
+        
+        # Calcul du ratio de mélange pi_alpha
+        ratio = (a_0 + K - 1) / (N_total * (b_0 - np.log(rho_safe)))
+        pi_alpha = ratio / (1 + ratio)
+        
+        # Échantillonnage du nouveau alpha
+        if np.random.rand() < pi_alpha:
+            self.alpha = np.random.gamma(a_0 + K, 1.0 / (b_0 - np.log(rho_safe)))
+        else:
+            self.alpha = np.random.gamma(a_0 + K - 1, 1.0 / (b_0 - np.log(rho_safe)))
+            
+        self.crp.alpha = self.alpha # On transmet la valeur au processus CRP
+
     def process_observation(self, x_i, y_i, stochastic_B=None, update_hyperparams=True):
-        """
-        Process a new observation sequentially.
-        """
-        # 1. Sample indicator z_i
+        # 1. Échantillonner l'indicateur z_i
         clusters_X = self._get_clusters_X()
         unnorm_probs = self.crp.compute_assignment_probabilities(x_i, clusters_X)
         
-        # Normalize to get probabilities
         prob_sum = sum(unnorm_probs)
         if prob_sum == 0 or np.isnan(prob_sum):
-            # Fallback to uniform if probabilities vanish (edge case)
-            K_total = len(unnorm_probs)
-            probs = np.ones(K_total) / K_total
+            probs = np.ones(len(unnorm_probs)) / len(unnorm_probs)
         else:
             probs = np.array(unnorm_probs) / prob_sum
             
         z_i = np.random.choice(len(probs), p=probs)
         self.z.append(z_i)
         
-        # Value of P(x_i | z_i, alpha) approx given by unnormalized prob element
-        p_x_i_given_z_i = unnorm_probs[z_i]
+        # CORRECTION : On utilise la probabilité normalisée pour le calcul du poids
+        p_x_i_given_z_i_normalized = probs[z_i] 
         
-        # 2. Update cluster with new observation
         if z_i == self.next_cluster_id:
-            # Create new cluster
             new_expert = GPExpert(self.next_cluster_id, self.D, self.prior_mean, self.prior_cov)
             self.experts[self.next_cluster_id] = new_expert
             self.next_cluster_id += 1
             
         expert = self.experts[z_i]
         
-        # Compute marginal likelihood before adding the point (for weight ratio)
-        log_ml_before = expert.marginal_likelihood(expert.theta, expert.sigma_sq, B=stochastic_B)
-        
-        # Add observation
+        # 2. Ajouter l'observation EN PREMIER et mettre à jour les hyperparamètres
         expert.add_observation(x_i, y_i)
-        
-        # Update hyperparameters via Elliptical Slice Sampler
         if update_hyperparams:
             expert.update_hyperparameters(B=stochastic_B)
             
-        # Compute marginal likelihood after adding and updating
-        log_ml_after = expert.marginal_likelihood(expert.theta, expert.sigma_sq, B=stochastic_B)
+        # 3. CORRECTION : Calculer le ratio de vraisemblance avec le MEME nouveau theta
+        log_ml_after = expert.marginal_likelihood(expert.theta, expert.sigma_sq, B=stochastic_B, exclude_last=False)
+        log_ml_before = expert.marginal_likelihood(expert.theta, expert.sigma_sq, B=stochastic_B, exclude_last=True)
         
-        # 3. Update Weight
-        # Weight update ratio: P(y_k | X_k, theta_k) / P(y'_k | X'_k, theta'_k) * P(x_i | z_i)
-        
-        log_weight_update = (log_ml_after - log_ml_before) + np.log(max(p_x_i_given_z_i, 1e-300))
+        # 4. Mise à jour du Poids (Équation 17 corrigée)
+        log_weight_update = (log_ml_after - log_ml_before) + np.log(max(p_x_i_given_z_i_normalized, 1e-300))
         self.log_weight += log_weight_update
+        
+        # 5. CORRECTION : Mettre à jour Alpha (Équation 15)
+        self.update_alpha()
 
+        
 class SMCSampler:
     def __init__(self, J, D, prior_mean, prior_cov, alpha_init, crp_params):
         """

@@ -20,7 +20,7 @@ def load_eurusd_data(period="1y"):
     """
     print(f"Downloading EUR/USD data for period: {period}...")
     ticker = "EURUSD=X"
-    n_points_target = 400
+    n_points_target = 200
     try:
         data = yf.download(ticker, period=period, progress=False)
         if data.empty:

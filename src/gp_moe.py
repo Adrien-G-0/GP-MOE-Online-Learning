@@ -33,7 +33,7 @@ class GPMoE:
                 'mu_0': np.zeros(D),
                 'kappa_0': 1.0,
                 'nu_0': float(D + 2.0),
-                'Psi_0': np.eye(D) * 0.1
+                'Psi_0': np.eye(D) * 5.0  
             }
             
         self.smc = SMCSampler(J, D, prior_mean, prior_cov, alpha_init, crp_params)

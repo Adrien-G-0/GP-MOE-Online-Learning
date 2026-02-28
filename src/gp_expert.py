@@ -45,7 +45,7 @@ class GPExpert:
         """Number of observations in this cluster."""
         return len(self.X)
 
-    def marginal_likelihood(self, theta, sigma_sq, B=None):
+    def marginal_likelihood(self, theta, sigma_sq, B=None, exclude_last=False):
         """
         Computes the log marginal likelihood of the observations given hyperparameters.
         
@@ -59,8 +59,12 @@ class GPExpert:
         """
         X = self.get_X()
         y = self.get_y()
-        N = self.N
         
+        if exclude_last and len(X) > 0:
+            X = X[:-1]
+            y = y[:-1]
+            
+        N = len(X)
         if N == 0:
             return 0.0
             
