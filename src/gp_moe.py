@@ -60,17 +60,19 @@ class GPMoE:
         var_preds = []
         
         for p in self.smc.particles:
-            # 1. Compute assignment prob to each cluster for this particle
             clusters_X = p._get_clusters_X()
+            # Obtenir les probabilités non normalisées
             unnorm_probs = p.crp.compute_assignment_probabilities(x_test, clusters_X)
             
-            prob_sum = sum(unnorm_probs)
+            # CORRECTION (Algorithme 2) : Ne conserver que les clusters existants (K^+)
+            unnorm_probs_existing = unnorm_probs[:-1] 
+            
+            prob_sum = sum(unnorm_probs_existing)
             if prob_sum > 0:
-                p_k = np.array(unnorm_probs) / prob_sum
+                p_k = np.array(unnorm_probs_existing) / prob_sum
             else:
-                p_k = np.ones(len(unnorm_probs)) / len(unnorm_probs)
+                p_k = np.ones(len(unnorm_probs_existing)) / max(1, len(unnorm_probs_existing))
                 
-            # 2. Predict within each cluster
             p_mean_k = []
             p_var_k = []
             
@@ -88,7 +90,6 @@ class GPMoE:
                 
                 N_k = expert.N
                 if self.B is not None and N_k > self.B:
-                    # Approximation using a subset
                     indices = np.random.choice(N_k, size=self.B, replace=False)
                     X_train = X_k[indices]
                     y_train = y_k[indices]
@@ -107,35 +108,31 @@ class GPMoE:
                     
                 k_star = rbf_kernel(X_train, x_test, expert.theta).flatten()
                 
-                # Mean: k_star^T K^-1 y
                 alpha = np.linalg.solve(L.T, np.linalg.solve(L, y_train))
                 mu = np.dot(k_star, alpha)
                 
-                # Var: K_star_star - k_star^T K^-1 k_star
                 v = np.linalg.solve(L, k_star)
                 variance = rbf_kernel(x_test, x_test, expert.theta)[0, 0] + expert.sigma_sq - np.dot(v, v)
                 
                 p_mean_k.append(mu)
                 p_var_k.append(max(0.0, variance))
                 
-            # For the new cluster
-            p_mean_k.append(0.0)
-            from .kernel import rbf_kernel
-            new_sigma_sq = np.exp(p.prior_mean[-1])
-            new_theta = np.exp(p.prior_mean[:-1])
-            p_var_k.append(new_sigma_sq + rbf_kernel(x_test, x_test, new_theta)[0, 0])
+            # Les calculs "For the new cluster" ont été supprimés pour suivre l'Algorithme 2.
             
-            # Mixture mean & variance for this particle
+            # Si aucun cluster existant (au tout début), fallback à 0
+            if len(p_mean_k) == 0:
+                p_mean_k = [0.0]
+                new_sigma_sq = np.exp(p.prior_mean[-1])
+                new_theta = np.exp(p.prior_mean[:-1])
+                from .kernel import rbf_kernel
+                p_var_k = [new_sigma_sq + rbf_kernel(x_test, x_test, new_theta)[0, 0]]
+                p_k = np.array([1.0])
+            
             p_mean = np.sum(p_k * np.array(p_mean_k))
             p_var = np.sum(p_k * (np.array(p_var_k) + np.array(p_mean_k)**2)) - p_mean**2
             
             mean_preds.append(p_mean)
             var_preds.append(max(0.0, p_var))
             
-        # Overall prediction weighted over SMC particles
-        weights = np.array([p.weight for p in self.smc.particles])
-        
-        final_mean = np.sum(weights * np.array(mean_preds))
-        final_var = np.sum(weights * (np.array(var_preds) + np.array(mean_preds)**2)) - final_mean**2
-        
-        return final_mean, max(0.0, final_var)
+        weights = [p.weight for p in self.smc.particles]
+        return np.average(mean_preds, weights=weights), np.average(var_preds, weights=weights)

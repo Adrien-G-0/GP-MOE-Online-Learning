@@ -66,8 +66,8 @@ class SMCParticle:
         z_i = np.random.choice(len(probs), p=probs)
         self.z.append(z_i)
         
-        # CORRECTION : On utilise la probabilité normalisée pour le calcul du poids
-        p_x_i_given_z_i_normalized = probs[z_i] 
+        # CORRECTION : Utiliser la probabilité NON NORMALISÉE selon l'Éq 17
+        p_x_i_given_z_i_unnormalized = unnorm_probs[z_i] 
         
         if z_i == self.next_cluster_id:
             new_expert = GPExpert(self.next_cluster_id, self.D, self.prior_mean, self.prior_cov)
@@ -81,18 +81,19 @@ class SMCParticle:
         if update_hyperparams:
             expert.update_hyperparameters(B=stochastic_B)
             
-        # 3. CORRECTION : Calculer le ratio de vraisemblance avec le MEME nouveau theta
+        # 3. Calculer le ratio de vraisemblance avec le MEME nouveau theta
         log_ml_after = expert.marginal_likelihood(expert.theta, expert.sigma_sq, B=stochastic_B, exclude_last=False)
         log_ml_before = expert.marginal_likelihood(expert.theta, expert.sigma_sq, B=stochastic_B, exclude_last=True)
         
-        # 4. Mise à jour du Poids (Équation 17 corrigée)
-        log_weight_update = (log_ml_after - log_ml_before) + np.log(max(p_x_i_given_z_i_normalized, 1e-300))
+        # 4. CORRECTION : Mise à jour du Poids (Équation 17)
+        # On utilise p_x_i_given_z_i_unnormalized pour correspondre à P(x_i | z_i, alpha)
+        log_weight_update = (log_ml_after - log_ml_before) + np.log(max(p_x_i_given_z_i_unnormalized, 1e-300))
         self.log_weight += log_weight_update
         
-        # 5. CORRECTION : Mettre à jour Alpha (Équation 15)
+        # 5. Mettre à jour Alpha (Équation 15)
         self.update_alpha()
 
-        
+
 class SMCSampler:
     def __init__(self, J, D, prior_mean, prior_cov, alpha_init, crp_params):
         """
