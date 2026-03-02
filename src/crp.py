@@ -4,25 +4,13 @@ import scipy.special as sp
 def multivariate_t_distribution(x, mu, Sigma, nu):
     """
     Computes the PDF of the multivariate t-distribution.
-    
-    Args:
-        x (np.ndarray): The data point, shape (D,).
-        mu (np.ndarray): The mean vector, shape (D,).
-        Sigma (np.ndarray): The scale matrix, shape (D, D).
-        nu (float): Degrees of freedom.
-        
-    Returns:
-        float: Probability density at x.
     """
     D = len(x)
-    
-    # Calculate log density for numerical stability
     try:
         sign, logdet = np.linalg.slogdet(Sigma)
         if sign <= 0:
             Sigma = Sigma + 1e-6 * np.eye(D)
             sign, logdet = np.linalg.slogdet(Sigma)
-            
         inv_Sigma = np.linalg.inv(Sigma)
     except np.linalg.LinAlgError:
         Sigma = Sigma + 1e-6 * np.eye(D)
@@ -51,10 +39,6 @@ class CRP:
     using multivariate-T marginal predictive distributions.
     """
     def __init__(self, alpha, mu_0, kappa_0, nu_0, Psi_0):
-        """
-        Initializes the CRP with Normal-Inverse-Wishart (NIW) prior parameters
-        for the covariates X.
-        """
         self.alpha = alpha
         self.mu_0 = np.array(mu_0)
         self.kappa_0 = kappa_0
@@ -65,7 +49,7 @@ class CRP:
     def _compute_posterior_predictive(self, X_k):
         """
         Computes the parameters of the posterior predictive Student-t distribution
-        given the points in cluster k.
+        given the points in cluster k (Equation 14).
         """
         N = len(X_k)
         if N == 0:
@@ -97,21 +81,12 @@ class CRP:
     def compute_assignment_probabilities(self, x_i, clusters_X):
         """
         Computes the probability of assigning x_i to each existing cluster
-        and to a new cluster.
-        
-        Args:
-            x_i (np.ndarray): The new observation covariates.
-            clusters_X (list of np.ndarray): List of data assigned to each existing cluster.
-            
-        Returns:
-            list: Unnormalized probabilities for each cluster, appended with probability for a new cluster.
+        and to a new cluster (Equation 13).
         """
         probs = []
         for X_k in clusters_X:
             N_k = len(X_k)
             mu_k, Sigma_k, df_k = self._compute_posterior_predictive(X_k)
-            
-            # Predict
             prob_k = N_k * multivariate_t_distribution(x_i, mu_k, Sigma_k, df_k)
             probs.append(prob_k)
             
