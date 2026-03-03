@@ -67,21 +67,27 @@ class SMCParticle:
         expert = self.experts[z_i]
         
         # 2. Add observation and update hyperparameters
+        # 2. Add observation
         expert.add_observation(x_i, y_i)
-        if update_hyperparams:
-            expert.update_hyperparameters(B=stochastic_B)
-            
-        # 3. Fixed batch for Weight Ratio (Eq 17)
+        
+        # 3. DÉFINIR LE BATCH AVANT DE CALCULER LA VRAISEMBLANCE
         batch_indices = None
         if stochastic_B is not None and expert.N > stochastic_B:
             old_indices = np.random.choice(expert.N - 1, size=stochastic_B - 1, replace=False)
             batch_indices = np.append(old_indices, expert.N - 1)
             
-        log_ml_after = expert.marginal_likelihood(expert.theta, expert.sigma_sq, indices=batch_indices, exclude_last=False)
+        # CALCULER LA VRAISEMBLANCE AVANT LA MISE A JOUR DES PARAMÈTRES
         log_ml_before = expert.marginal_likelihood(expert.theta, expert.sigma_sq, indices=batch_indices, exclude_last=True)
         
-        # 4. Update Weight & Alpha
-        log_weight_update = (log_ml_after - log_ml_before) + np.log(max(p_x_i_given_z_i_normalized, 1e-300))
+        # 4. Update hyperparameters
+        if update_hyperparams:
+            expert.update_hyperparameters(B=stochastic_B)
+            
+        # CALCULER LA VRAISEMBLANCE APRÈS LA MISE A JOUR
+        log_ml_after = expert.marginal_likelihood(expert.theta, expert.sigma_sq, indices=batch_indices, exclude_last=False)
+        
+        # 5. Update Weight & Alpha (Correction du poids ici aussi)
+        log_weight_update = (log_ml_after - log_ml_before) + np.log(max(prob_sum, 1e-300))
         self.log_weight += log_weight_update
         self.update_alpha()
 

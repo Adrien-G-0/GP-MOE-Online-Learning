@@ -20,7 +20,7 @@ class GPMoE:
                 'mu_0': np.zeros(D),
                 'kappa_0': 1.0,
                 'nu_0': float(D + 2.0),
-                'Psi_0': np.eye(D) * 2.0  # Elargissement du prior pour la création de clusters
+                'Psi_0': np.eye(D) * 0.2  # Réduit l'étalement (0.1 ou 0.2 est idéal)
             }
             
         self.smc = SMCSampler(J, D, prior_mean, prior_cov, alpha_init, crp_params)
