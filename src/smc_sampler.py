@@ -92,10 +92,18 @@ class SMCParticle:
         self.update_alpha()
 
 class SMCSampler:
-    def __init__(self, J, D, prior_mean, prior_cov, alpha_init, crp_params):
-        self.J = J
-        self.particles = [SMCParticle(j, D, prior_mean, prior_cov, alpha_init, crp_params) for j in range(J)]
-        self.normalize_weights()
+    def __init__(self, J, D, prior_mean, prior_cov, alpha_init, crp_params, 
+                    enable_retro=False, retro_freq=20, retro_threshold=3, retro_B=None):
+            self.J = J
+            self.particles = [SMCParticle(j, D, prior_mean, prior_cov, alpha_init, crp_params) for j in range(J)]
+            
+            self.t = 0
+            self.enable_retro = enable_retro
+            self.retro_freq = retro_freq
+            self.retro_threshold = retro_threshold
+            self.retro_B = retro_B
+            
+            self.normalize_weights()
         
     def normalize_weights(self):
         log_weights = np.array([p.log_weight for p in self.particles])
@@ -138,4 +146,95 @@ class SMCSampler:
         N_eff = self.compute_N_eff()
         if N_eff < self.J / 2.0:
             self.resample()
+
+        # Déclenchement conditionnel du rétrospective sampling
+        if self.enable_retro and (self.t % self.retro_freq == 0):
+            self.retrospective_sample()
             
+
+    def retrospective_sample(self):
+        """
+        Nettoie les particules en réassignant point par point les données des 
+        petits clusters aberrants vers les experts les plus probables.
+        """
+        if not self.enable_retro:
+            return
+
+        for particle in self.particles:
+            # 1. Identifier les clusters actifs et légitimes (au-dessus du seuil)
+            valid_clusters = [k for k in range(particle.next_cluster_id) 
+                              if particle.experts[k].N >= self.retro_threshold]
+            
+            if len(valid_clusters) == 0:
+                continue
+
+            # 2. Identifier les clusters suspects (sous le seuil)
+            suspect_clusters = [k for k in range(particle.next_cluster_id) 
+                                if 0 < particle.experts[k].N < self.retro_threshold]
+
+            for k_suspect in suspect_clusters:
+                expert_suspect = particle.experts[k_suspect]
+                
+                # Extraire les points un par un pour les partager si besoin
+                points_X = list(expert_suspect.X)
+                points_y = list(expert_suspect.y)
+                
+                # Vider l'expert suspect
+                expert_suspect.X = []
+                expert_suspect.y = []
+                
+                # Réassigner chaque point individuellement
+                for px, py in zip(points_X, points_y):
+                    best_k = -1
+                    best_ll = -float('inf')
+                    
+                    # Tester la vraisemblance de ce point sous chaque expert valide
+                    for k_valid in valid_clusters:
+                        expert_valid = particle.experts[k_valid]
+                        
+                        # Calcul de l'erreur prédictive (Vraisemblance marginale approchée)
+                        from .kernel import rbf_kernel, compute_covariance
+                        try:
+                            # On utilise le minibatch pour que ça reste rapide
+                            N_k = expert_valid.N
+                            if self.retro_B is not None and N_k > self.retro_B:
+                                indices = np.random.choice(N_k, size=self.retro_B, replace=False)
+                                X_train = expert_valid.get_X()[indices]
+                                y_train = expert_valid.get_y()[indices]
+                                adjusted_sigma_sq = (N_k * expert_valid.sigma_sq) / self.retro_B
+                            else:
+                                X_train = expert_valid.get_X()
+                                y_train = expert_valid.get_y()
+                                adjusted_sigma_sq = expert_valid.sigma_sq
+
+                            K = compute_covariance(X_train, expert_valid.theta, adjusted_sigma_sq)
+                            L = np.linalg.cholesky(K + 1e-6 * np.eye(len(K)))
+                            
+                            k_star = rbf_kernel(X_train, px, expert_valid.theta).flatten()
+                            alpha = np.linalg.solve(L.T, np.linalg.solve(L, y_train))
+                            
+                            # Prédiction GP
+                            mu_pred = np.dot(k_star, alpha)
+                            v = np.linalg.solve(L, k_star)
+                            var_pred = rbf_kernel(px, px, expert_valid.theta)[0, 0] + expert_valid.sigma_sq - np.dot(v, v)
+                            
+                            # Log-vraisemblance Gaussienne de la prédiction
+                            var_pred = max(var_pred, 1e-6)
+                            ll = -0.5 * np.log(2 * np.pi * var_pred) - ((py - mu_pred)**2) / (2 * var_pred)
+                            
+                        except Exception:
+                            ll = -float('inf')
+                            
+                        if ll > best_ll:
+                            best_ll = ll
+                            best_k = k_valid
+                            
+                    # 3. Assigner et nettoyer
+                    if best_k != -1:
+                        expert_receveur = particle.experts[best_k]
+                        expert_receveur.add_observation(px, py)
+                        # Optionnel : ré-optimiser l'expert après injection de nouveaux points
+                        # expert_receveur.update_hyperparameters(B=self.retro_B)
+                        
+                        # Mise à jour historique heuristique
+                        particle.z = [best_k if z == k_suspect else z for z in particle.z]

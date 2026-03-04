@@ -5,7 +5,9 @@ class GPMoE:
     """
     High-level API for Sequential Gaussian Processes for Online Learning.
     """
-    def __init__(self, D, J=20, prior_mean=None, prior_cov=None, alpha_init=1.0, crp_params=None, B=None):
+    def __init__(self, D, J=20, prior_mean=None, prior_cov=None, alpha_init=1.0, 
+                 crp_params=None, B=None,
+                 enable_retro=False, retro_freq=20, retro_threshold=3, retro_B=None):
         self.D = D
         self.J = J
         self.B = B
@@ -20,10 +22,15 @@ class GPMoE:
                 'mu_0': np.zeros(D),
                 'kappa_0': 1.0,
                 'nu_0': float(D + 2.0),
-                'Psi_0': np.eye(D) * 0.2  # Réduit l'étalement (0.1 ou 0.2 est idéal)
+                'Psi_0': np.eye(D) * 0.2  # Prior resserré pour encourager la création de clusters
             }
             
-        self.smc = SMCSampler(J, D, prior_mean, prior_cov, alpha_init, crp_params)
+        # Initialisation du SMCSampler avec les nouveaux paramètres de rétrospection
+        self.smc = SMCSampler(J, D, prior_mean, prior_cov, alpha_init, crp_params,
+                              enable_retro=enable_retro, 
+                              retro_freq=retro_freq, 
+                              retro_threshold=retro_threshold, 
+                              retro_B=retro_B)
         
     def update(self, x_i, y_i, update_hyperparams=True):
         self.smc.update(x_i, y_i, stochastic_B=self.B, update_hyperparams=update_hyperparams)
