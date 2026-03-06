@@ -10,12 +10,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.data_stream import DataStreamer
 from src.gp_moe import GPMoE
-from experiments.iot_extension import GPMoE_Retrospective
+from src.simple_gp import SimpleGP
 
-def load_eurusd_data(period="1y"):
+def load_extended_eurusd_data(period="5y", max_points=500):
     """
     Downloads EUR/USD daily closing prices using yfinance.
-    We limit to the last 200 days to keep the online learning experiment fast.
+    We extend the limit to capture more market dynamics and regime shifts.
     """
     print(f"Downloading EUR/USD data for period: {period}...")
     ticker = "EURUSD=X"
@@ -30,8 +30,8 @@ def load_eurusd_data(period="1y"):
     # Drop NaNs if any
     closes = closes[~np.isnan(closes)]
     
-    # Let's take the last 200 points for the online streaming test
-    n_points = min(200, len(closes))
+    # Take the last max_points for the online streaming test
+    n_points = min(max_points, len(closes))
     closes = closes[-n_points:]
     
     # X is just time steps
@@ -61,7 +61,7 @@ def run_online_experiment(model, X, y, name="Model"):
     cluster_assignments = []
     
     for i, (x_i_std, y_i_std) in enumerate(streamer):
-        if i % 50 == 0:
+        if i > 0 and i % 100 == 0:
             print(f"Step {i}/{streamer.N}")
             
         x_i_orig = X[i, 0]
@@ -84,79 +84,111 @@ def run_online_experiment(model, X, y, name="Model"):
             online_nlpds.append(nlpd)
             
         # 2. METTRE À JOUR LE MODÈLE
-        model.update(x_i_std, y_i_std)
-        
-        # Tracking des clusters
-        best_particle = max(model.smc.particles, key=lambda p: p.weight)
-        cluster_assignments.append(best_particle.z[-1])
-        
+        # Note: We don't force full optimize=True for SimpleGP here to keep it running reasonably fast,
+        # but the standard GP will still suffer from O(N^3) predictions.
+        if isinstance(model, SimpleGP):
+            model.update(x_i_std, y_i_std, optimize=False)
+            cluster_assignments.append(0) # Simple GP has no distinct clusters
+        else:
+            model.update(x_i_std, y_i_std)
+            # Tracking des clusters pour GP-MOE
+            best_particle = max(model.smc.particles, key=lambda p: p.weight)
+            cluster_assignments.append(best_particle.z[-1])
+            
     print(f"{name} - Mean Online MSE: {np.mean(online_mses):.6f}")
     print(f"{name} - Mean Online NLPD: {np.mean(online_nlpds):.4f}")
-    print(f"{name} - Discovered {best_particle.next_cluster_id} clusters total.")
     
     return np.array(online_X), np.array(online_mu), np.array(online_var), online_mses, cluster_assignments
 
 def main():
-    X, y = load_eurusd_data(period="1y")
+    X, y = load_extended_eurusd_data(period="5y", max_points=500)
     out_dir = os.path.dirname(__file__)
     D = X.shape[1]
     
     prior_mean = np.zeros(D + 1)
-    prior_cov = np.eye(D + 1) * 3.0
+    prior_cov = np.eye(D + 1) * 0.5
     
-    # 1. Run Standard GP-MOE
-    model_std = GPMoE(D=D, J=20, prior_mean=prior_mean, prior_cov=prior_cov, alpha_init=0.5)
-    std_X, std_mu, std_var, std_mses, std_c = run_online_experiment(model_std, X, y, name="Standard GP-MOE")
+    results = {}
+    metrics_table = []
     
-    # 2. Run Retrospective GP-MOE
-    model_retro = GPMoE_Retrospective(D=D, J=20, prior_mean=prior_mean, prior_cov=prior_cov, alpha_init=0.5, window_size=20)
-    ret_X, ret_mu, ret_var, ret_mses, ret_c = run_online_experiment(model_retro, X, y, name="Retrospective GP-MOE")
+    # --- 1. Run Simple GP ---
+    print("\n--- Initializing Simple GP ---")
+    simple_gp = SimpleGP(D=D)
+    res_x_sgp, res_mu_sgp, res_var_sgp, res_mses_sgp, res_c_sgp = run_online_experiment(
+        simple_gp, X, y, name="Simple GP"
+    )
+    
+    metrics_table.append({
+        "Model": "Simple GP",
+        "Mean MSE": np.mean(res_mses_sgp),
+        "Final MSE": res_mses_sgp[-1],
+        "Mean Variance": np.mean(res_var_sgp),
+        "Final Variance": res_var_sgp[-1]
+    })
+    
+    # --- 2. Run GP-MOE ---
+    j_val = 50
+    print(f"\n--- Initializing GP-MOE with J={j_val} ---")
+    gp_moe = GPMoE(D=D, J=j_val, prior_mean=prior_mean, prior_cov=prior_cov, alpha_init=0.5, B=50)
+    
+    res_x_moe, res_mu_moe, res_var_moe, res_mses_moe, res_c_moe = run_online_experiment(
+        gp_moe, X, y, name=f"GP-MOE J={j_val}"
+    )
+    
+    metrics_table.append({
+        "Model": f"GP-MOE (J={j_val})",
+        "Mean MSE": np.mean(res_mses_moe),
+        "Final MSE": res_mses_moe[-1],
+        "Mean Variance": np.mean(res_var_moe),
+        "Final Variance": res_var_moe[-1]
+    })
+    
+    # --- Export Metrics to CSV ---
+    df_metrics = pd.DataFrame(metrics_table)
+    csv_path = os.path.join(out_dir, "comparison_metrics.csv")
+    df_metrics.to_csv(csv_path, index=False)
+    print("\n" + "="*50)
+    print(f"Metrics successfully saved to {csv_path}")
+    print(df_metrics.to_string(index=False))
+    print("="*50 + "\n")
     
     # --- Visualization ---
-    plt.figure(figsize=(12, 12))
+    plt.figure(figsize=(14, 10))
     
-    # Plot Standard
-    plt.subplot(3, 1, 1)
-    # Vrais points colorés par cluster
-    plt.scatter(X, y, c=std_c, cmap='viridis', s=30, label='True EUR/USD Close', alpha=0.8)
-    # Ligne de prédiction en ligne
-    plt.plot(std_X, std_mu, 'r--', lw=2, label='Online Predictive Mean')
-    plt.fill_between(std_X, std_mu - 1.96 * np.sqrt(std_var), std_mu + 1.96 * np.sqrt(std_var), color='r', alpha=0.2, label='95% CI')
-    plt.title("Standard GP-MOE on EUR/USD - Sequential Online Prediction")
+    # Subplot 1: Simple GP
+    plt.subplot(2, 1, 1)
+    plt.plot(X, y, 'k.', markersize=6, label='True EUR/USD Close', alpha=0.6)
+    plt.plot(res_x_sgp, res_mu_sgp, 'b-', lw=2, label='Simple GP Predictive Mean')
+    plt.fill_between(res_x_sgp.flatten(), 
+                     res_mu_sgp - 1.96 * np.sqrt(res_var_sgp), 
+                     res_mu_sgp + 1.96 * np.sqrt(res_var_sgp), 
+                     color='blue', alpha=0.2, label='95% Confidence Interval')
+                     
+    plt.title("Simple GP: Online Prediction vs True Value")
     plt.ylabel("Exchange Rate")
     plt.legend()
     plt.grid(True)
     
-    # Plot Retrospective
-    plt.subplot(3, 1, 2)
-    plt.scatter(X, y, c=ret_c, cmap='plasma', s=30, label='True EUR/USD Close', alpha=0.8)
-    plt.plot(ret_X, ret_mu, 'b--', lw=2, label='Online Predictive Mean')
-    plt.fill_between(ret_X, ret_mu - 1.96 * np.sqrt(ret_var), ret_mu + 1.96 * np.sqrt(ret_var), color='b', alpha=0.2, label='95% CI')
-    plt.title("Retrospective GP-MOE on EUR/USD - Sequential Online Prediction")
+    # Subplot 2: GP-MOE
+    plt.subplot(2, 1, 2)
+    # CORRECTION ICI: X et y passés dans leur intégralité pour correspondre à res_c_moe
+    plt.scatter(X, y, c=res_c_moe, cmap='viridis', s=25, label='True EUR/USD Close (Colored by Cluster)', zorder=2)
+    plt.plot(res_x_moe, res_mu_moe, 'r-', lw=2, label=f'GP-MOE (J={j_val}) Predictive Mean', zorder=1)
+    plt.fill_between(res_x_moe.flatten(), 
+                     res_mu_moe - 1.96 * np.sqrt(res_var_moe), 
+                     res_mu_moe + 1.96 * np.sqrt(res_var_moe), 
+                     color='red', alpha=0.2, label='95% Confidence Interval', zorder=0)
+                     
+    plt.title(f"GP-MOE (J={j_val}): Online Prediction vs True Value (with Clustering)")
+    plt.xlabel("Time Step (Days)")
     plt.ylabel("Exchange Rate")
-    plt.legend()
-    plt.grid(True)
-    
-    # Plot Online MSE comparison
-    plt.subplot(3, 1, 3)
-    window = 10
-    std_mse_smooth = np.convolve(std_mses, np.ones(window)/window, mode='valid')
-    ret_mse_smooth = np.convolve(ret_mses, np.ones(window)/window, mode='valid')
-    
-    # On ajuste l'axe X pour le smoothing
-    plot_x_smooth = std_X[window-1:]
-    
-    plt.plot(plot_x_smooth, std_mse_smooth, 'r-', lw=2, label='Standard GP-MOE')
-    plt.plot(plot_x_smooth, ret_mse_smooth, 'b-', lw=2, label='Retrospective GP-MOE')
-    plt.title(f"Online Prediction MSE (Rolling Average, Window={window})")
-    plt.xlabel("Days")
-    plt.ylabel("Mean Squared Error")
     plt.legend()
     plt.grid(True)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "financial_data_online_results.png"))
-    print(f"\nPlot saved to {os.path.join(out_dir, 'financial_data_online_results.png')}")
+    plot_path = os.path.join(out_dir, "models_comparison_plot.png")
+    plt.savefig(plot_path)
+    print(f"Comparison plot saved to {plot_path}")
 
 if __name__ == "__main__":
     main()
